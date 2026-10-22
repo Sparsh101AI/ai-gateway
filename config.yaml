@@ -1,71 +1,14 @@
 baseline_model: large
-
-rate_limit:
-  requests_per_minute: 120
-  tokens_per_minute: 200000
-
-fallback:
-  max_attempts: 3
-  timeout_seconds: 30
-  breaker_threshold: 3
-  breaker_cooldown_seconds: 30
-
-routing:
-  tier_thresholds: [0.12, 0.45]
-
-providers:
-  mock:
-    type: mock
-  openai:
-    type: openai
-    base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-  anthropic:
-    type: anthropic
-    base_url: https://api.anthropic.com/v1
-    api_key_env: ANTHROPIC_API_KEY
+requests_per_minute: 120
+max_attempts: 3
+timeout_seconds: 30
+breaker_threshold: 3
+breaker_cooldown_seconds: 30
+tier_thresholds: [0.12, 0.45]
 
 models:
-  - name: small
-    provider: mock
-    upstream: mock-small
-    tier: 1
-    input_cost: 0.15
-    output_cost: 0.60
-    context_window: 128000
-    mock: {latency_ms: 120, failure_rate: 0.02}
-
-  - name: small-backup
-    provider: mock
-    upstream: mock-small-b
-    tier: 1
-    input_cost: 0.25
-    output_cost: 1.00
-    context_window: 128000
-    mock: {latency_ms: 150, failure_rate: 0.02}
-
-  - name: medium
-    provider: mock
-    upstream: mock-medium
-    tier: 2
-    input_cost: 1.00
-    output_cost: 4.00
-    context_window: 200000
-    mock: {latency_ms: 350, failure_rate: 0.03}
-
-  - name: large
-    provider: mock
-    upstream: mock-large
-    tier: 3
-    input_cost: 3.00
-    output_cost: 15.00
-    context_window: 200000
-    mock: {latency_ms: 800, failure_rate: 0.05}
-
-  # - name: gpt-4o-mini
-  #   provider: openai
-  #   upstream: gpt-4o-mini
-  #   tier: 1
-  #   input_cost: 0.15
-  #   output_cost: 0.60
-  #   context_window: 128000
+  - {name: small,        provider: mock, tier: 1, input_cost: 0.15, output_cost: 0.60, latency_ms: 120, failure_rate: 0.02}
+  - {name: small-backup, provider: mock, tier: 1, input_cost: 0.25, output_cost: 1.00, latency_ms: 150, failure_rate: 0.02}
+  - {name: medium,       provider: mock, tier: 2, input_cost: 1.00, output_cost: 4.00, latency_ms: 350, failure_rate: 0.03}
+  - {name: large,        provider: mock, tier: 3, input_cost: 3.00, output_cost: 15.00, latency_ms: 800, failure_rate: 0.05}
+  # - {name: gpt-4o-mini, provider: openai, tier: 1, input_cost: 0.15, output_cost: 0.60}

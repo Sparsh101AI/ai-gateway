@@ -1,69 +1,41 @@
 import os
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 import yaml
 
 
 @dataclass
-class ModelSpec:
+class Model:
     name: str
     provider: str
-    upstream: str
     tier: int
     input_cost: float
     output_cost: float
-    context_window: int = 128000
-    mock: dict = field(default_factory=dict)
+    latency_ms: int = 200
+    failure_rate: float = 0.0
 
-    def cost(self, input_tokens: int, output_tokens: int) -> float:
+    def cost(self, input_tokens, output_tokens):
         return (input_tokens * self.input_cost + output_tokens * self.output_cost) / 1_000_000
 
 
 @dataclass
-class RateLimitConfig:
+class Settings:
+    models: list
+    baseline_model: str = "large"
     requests_per_minute: int = 120
-    tokens_per_minute: int = 200000
-
-
-@dataclass
-class FallbackConfig:
     max_attempts: int = 3
     timeout_seconds: float = 30
     breaker_threshold: int = 3
     breaker_cooldown_seconds: float = 30
-
-
-@dataclass
-class Settings:
-    models: list[ModelSpec]
-    providers: dict[str, dict]
-    baseline_model: str
-    rate_limit: RateLimitConfig
-    fallback: FallbackConfig
-    tier_thresholds: tuple[float, float] = (0.12, 0.45)
-
-    def model(self, name: str) -> ModelSpec:
-        for m in self.models:
-            if m.name == name:
-                return m
-        raise KeyError(name)
+    tier_thresholds: tuple = (0.12, 0.45)
 
     @property
-    def baseline(self) -> ModelSpec:
-        return self.model(self.baseline_model)
+    def baseline(self):
+        return next(m for m in self.models if m.name == self.baseline_model)
 
 
-def load_settings(path: str | os.PathLike | None = None) -> Settings:
-    path = Path(path or os.getenv("GATEWAY_CONFIG", "config.yaml"))
-    raw = yaml.safe_load(path.read_text())
-    models = [ModelSpec(**m) for m in raw["models"]]
-    thresholds = raw.get("routing", {}).get("tier_thresholds", [0.12, 0.45])
-    return Settings(
-        models=models,
-        providers=raw.get("providers", {}),
-        baseline_model=raw.get("baseline_model", max(models, key=lambda m: m.output_cost).name),
-        rate_limit=RateLimitConfig(**raw.get("rate_limit", {})),
-        fallback=FallbackConfig(**raw.get("fallback", {})),
-        tier_thresholds=tuple(thresholds),
-    )
+def load_settings(path=None):
+    with open(path or os.getenv("GATEWAY_CONFIG", "config.yaml")) as f:
+        raw = yaml.safe_load(f)
+    raw["models"] = [Model(**m) for m in raw["models"]]
+    return Settings(**raw)

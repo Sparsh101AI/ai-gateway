@@ -1,116 +1,69 @@
 # Cost-Efficient AI Gateway
 
-A gateway that handles LLM requests. It sends each prompt to the cheapest model that can do the job, rate-limits each client, and falls back to another model when an upstream fails. An observability pipeline tracks latency, token use, cost and failures.
+A small gateway for LLM requests. It sends each prompt to the cheapest model that can handle it, rate-limits each client, and falls back to another model when one fails. It also tracks latency, tokens, cost and failures.
 
-**Stack:** Python · FastAPI · LLM routing · Observability (Prometheus metrics + JSONL request logs)
+**Stack:** Python · FastAPI · LLM routing · Observability
 
 ## How it works
 
 ```
-client ──► rate limiter ──► router ──► fallback executor ──► provider (OpenAI / Anthropic / mock)
-              │                │               │
-              └────────────────┴───────────────┴──► metrics + request log  ──►  /stats  /metrics
+request ─► rate limiter ─► router ─► try models in order (fallback + circuit breaker) ─► metrics / log
 ```
 
-| Component | File | What it does |
-|---|---|---|
-| **Router** | `gateway/router.py` | Gives each prompt a complexity score from 0 to 1, based on length, reasoning keywords ("analyze", "prove", "design"…), code blocks and conversation depth. The score maps to a tier (1 = small, 2 = medium, 3 = large), and the cheapest model in that tier is tried first. Clients can force a tier with `quality` or pin a specific `model`. |
-| **Rate limiter** | `gateway/ratelimit.py` | Two token buckets per client (keyed by the `X-Client-Id` header): requests per minute and tokens per minute. The token estimate is corrected to actual usage once the response arrives. Returns `429` with `Retry-After`. |
-| **Fallback + circuit breaker** | `gateway/fallback.py` | Works through the routing plan: same-tier alternatives first, then higher tiers, then lower tiers as a last resort. Each attempt has a timeout. After N failures in a row a model's circuit opens, the router skips it, and after a cooldown it gets one trial request. Errors that retrying won't fix (for example a 400) stop the chain. |
-| **Observability** | `gateway/observability.py` | Counts requests, failures, fallbacks and rate-limit hits; tracks tokens and cost per model; keeps a latency histogram and p50/p95/p99. Compares the cost against a baseline of sending everything to the most expensive model. Writes every request to `logs/requests.jsonl`. |
-| **Providers** | `gateway/providers/` | OpenAI-compatible (`/chat/completions`), Anthropic (`/messages`), and a mock provider with configurable latency and failure rate, so the project runs without API keys. |
+| File | What it does |
+|---|---|
+| `gateway/router.py` | Scores each prompt from 0 to 1 using its length, keywords ("analyze", "prove", "design" raise the score; "translate", "summarize" lower it) and code blocks. The score picks a tier (small / medium / large). Models are tried cheapest first: same tier, then higher tiers, then lower tiers as a last resort. |
+| `gateway/ratelimit.py` | Per-client token bucket (requests per minute), keyed by the `X-Client-Id` header. Returns `429` with `Retry-After`. |
+| `gateway/gateway.py` | Runs the request: rate limit → route → call models in order with a timeout. After 3 failures in a row a model is skipped for 30 seconds (circuit breaker). |
+| `gateway/metrics.py` | Counts requests, failures and fallbacks; tracks tokens, cost and p50/p95 latency; compares cost against sending everything to the most expensive model. Writes every request to `logs/requests.jsonl`. |
+| `gateway/providers.py` | A mock provider (simulated latency and failures, so it runs without keys) and an OpenAI-compatible provider. |
+| `gateway/app.py` | HTTP API. |
 
 ## Results
 
-`bench/run.py` sends a synthetic workload of simple, medium and complex prompts through the gateway. It compares the routed cost with sending everything to the `large` model (2,000 requests, mock providers, prices from `config.yaml`):
+`bench.py` sends 2,000 simple, medium and complex prompts through the gateway and compares the cost against sending everything to the `large` model:
 
-| Traffic mix (simple / medium / complex) | Baseline cost | Routed cost | Savings |
-|---|---|---|---|
-| 60 / 25 / 15 | $3.40 | $2.25 | **33.8%** |
-| 55 / 25 / 20 | $4.05 | $2.95 | **27.1%** |
-| 45 / 30 / 25 | $4.67 | $3.54 | **24.1%** |
+| Traffic mix (simple / medium / complex) | Savings |
+|---|---|
+| 60 / 25 / 15 | **35.6%** |
+| 55 / 25 / 20 | **28.5%** |
+| 45 / 30 / 25 | **23.7%** |
 
-Savings depend mostly on how much of your traffic is simple. Complex prompts still go to the large model on purpose. With 2–5% simulated upstream failure rates, fallback brought requests that failed completely down to 0.
+How much you save depends on how much of your traffic is simple. With 2–5% simulated upstream failures, fallback still served all 2,000 requests.
 
-## Quick start
+## Run it
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+
+pytest -q                                   # tests
+python bench.py --mix 0.60,0.25,0.15        # cost benchmark
+uvicorn gateway.app:create_app --factory    # start the server on :8000
 ```
 
-Run the tests:
-
 ```bash
-pytest -q
-```
-
-Run the cost benchmark:
-
-```bash
-python bench/run.py -n 2000 --mix 0.60,0.25,0.15
-```
-
-Start the gateway (uses the mock models by default, no keys needed):
-
-```bash
-uvicorn gateway.app:create_app --factory --port 8000
-```
-
-Send a request:
-
-```bash
-curl localhost:8000/v1/chat/completions \
-  -H 'content-type: application/json' -H 'X-Client-Id: team-a' \
+curl localhost:8000/v1/chat/completions -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"Translate hello to Spanish"}]}'
 ```
 
-The response follows the OpenAI chat format, plus a `gateway` block:
+The response includes the model used, token usage, cost, baseline cost, latency and the number of fallbacks.
 
-```json
-"gateway": {"complexity": 0.0, "cost_usd": 1.89e-05, "baseline_cost_usd": 0.000468,
-            "latency_ms": 91.2, "attempts": [{"model": "small", "ok": true, ...}]}
-```
-
-Request options: `model` (`"auto"` or a model name from config), `quality` (`low` / `medium` / `high`), `max_tokens`.
-
-## Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/v1/chat/completions` | Routed chat completion |
-| GET | `/health` | Circuit breaker state per model (`closed` / `open` / `half_open`) |
-| GET | `/stats` | JSON summary: latency percentiles, tokens, cost, savings, per-model breakdown |
-| GET | `/metrics` | Prometheus format, ready to scrape (counters + latency histogram) |
+| Endpoint | |
+|---|---|
+| `POST /v1/chat/completions` | Routed chat completion |
+| `GET /health` | Circuit breaker state per model |
+| `GET /stats` | Latency, tokens, cost, savings, per-model breakdown |
 
 ## Using real models
 
-1. Copy `.env.example` to `.env` and fill in your keys. `.env` is gitignored, so **never commit keys**.
-2. In `config.yaml`, add models under the `openai` or `anthropic` provider (there's a commented example). Set the `tier` and per-million-token `input_cost` / `output_cost` for each one.
-3. Export the variables and start the server:
+1. Copy `.env.example` to `.env` and add your key. `.env` is gitignored, so **never commit keys**.
+2. Add models to `config.yaml` with `provider: openai` (there's a commented example), giving each a tier and its per-million-token prices.
+3. Load the keys and start the server:
 
 ```bash
 set -a && source .env && set +a
-uvicorn gateway.app:create_app --factory --port 8000
+uvicorn gateway.app:create_app --factory
 ```
 
-A provider whose key variable isn't set is skipped, and the router falls through to the remaining models.
-
-## Configuration
-
-Everything lives in `config.yaml`: models and prices, `baseline_model` (used for the savings comparison), rate limits, fallback attempts and timeouts, circuit breaker threshold and cooldown, and the routing `tier_thresholds`. Use a different file with `GATEWAY_CONFIG=path.yaml`.
-
-## Project layout
-
-```
-gateway/
-  app.py            FastAPI app and endpoints
-  core.py           ties rate limiting, routing, fallback and metrics together
-  router.py         complexity scoring and model selection
-  ratelimit.py      per-client token buckets
-  fallback.py       retry chain and circuit breaker
-  observability.py  metrics, Prometheus export, JSONL log
-  providers/        openai, anthropic, mock
-bench/              workload generator and cost benchmark
-tests/              unit and API tests
-```
+All settings (models, prices, rate limit, fallback, breaker, routing thresholds) live in `config.yaml`.
