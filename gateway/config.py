@@ -22,7 +22,7 @@ class Model:
 class Settings:
     models: list
     baseline_model: str = "large"
-    requests_per_minute: int = 120
+    requests_per_minute: int = 60
     max_attempts: int = 3
     timeout_seconds: float = 30
     breaker_threshold: int = 3
